@@ -1,0 +1,66 @@
+# Сборка APK с клиентом на серверах GitHub: ставить NDK и подпись у себя не нужно.
+# Как пользоваться — README.md, раздел «Сборка без NDK: GitHub Actions».
+name: Build modded APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: "Прямая ссылка на исходный APK. Пусто: взять APK из релиза с тегом base"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Подготовка проекта и исходного APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK_URL: ${{ inputs.apk_url }}
+        run: |
+          set -euo pipefail
+          if [ -f make_apk.sh ]; then
+            echo "PROJ=$PWD" >> "$GITHUB_ENV"
+          else
+            echo "В репозитории только workflow: беру проект из релиза base"
+            gh release download base --repo "$GITHUB_REPOSITORY" --pattern 'mcpe-native-client.zip' --clobber
+            unzip -q mcpe-native-client.zip
+            echo "PROJ=$PWD/mcpe-native-client" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$APK_URL" ]; then
+            curl -fL --retry 3 -o base.apk "$APK_URL"
+          else
+            gh release download base --repo "$GITHUB_REPOSITORY" --pattern '*.apk' --output base.apk --clobber
+          fi
+          ls -l base.apk
+
+      - name: Сборка, патч и подпись
+        working-directory: ${{ env.PROJ }}
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KS_PASS: ${{ secrets.KS_PASS }}
+        run: |
+          set -euo pipefail
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/user.jks"
+            export KEYSTORE="$RUNNER_TEMP/user.jks"
+          fi
+          bash make_apk.sh "$GITHUB_WORKSPACE/base.apk" mc-mod.apk
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp mc-mod.apk "$GITHUB_WORKSPACE/out/"
+          if [ -f build/libmcclient.so ]; then cp build/libmcclient.so "$GITHUB_WORKSPACE/out/"; fi
+          if [ -z "$KEYSTORE_B64" ]; then cp mcclient.jks "$GITHUB_WORKSPACE/out/"; fi   # свой ключ в артефакт не кладём
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mc-mod
+          path: out/
+          retention-days: 7
